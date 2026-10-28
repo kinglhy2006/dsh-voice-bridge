@@ -1,0 +1,31 @@
+{
+  "name": "dsh-voice-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "贾维斯式语音助手：唤醒词「贾维斯」+ 本地中文识别 + 语音朗读回答，全部跑在 DSH 里。",
+  "keywords": ["dsh-plugin", "voice", "wake-word", "speech-to-text", "tts", "jarvis"],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "license": "MIT",
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true }
+  }
+}

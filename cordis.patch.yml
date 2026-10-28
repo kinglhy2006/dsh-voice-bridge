@@ -1,0 +1,5 @@
+# dsh-voice-bridge 的挂载补丁：把本插件接进 Harness。
+# 行 id 必须与 lib/index.js 里 `export const name` 完全一致。
+- insert:
+    - id: dsh-voice-bridge
+      name: 'dsh-voice-bridge'

@@ -1,0 +1,18 @@
+# 运行时产生的状态文件，不要提交
+jarvis/voice.log
+jarvis/speak.log
+jarvis/transcript.log
+jarvis/outbox.json
+jarvis/outbox.ack.json
+jarvis/outbox.json.tmp
+jarvis/interrupted.json
+jarvis/diag.json
+jarvis/voice_turn.json
+jarvis/device.json
+jarvis/*.flag
+jarvis/*.flag.stamp
+jarvis/_speak*.mp3
+jarvis/_speak*.wav
+jarvis/_*.mp3
+jarvis/_*.wav
+node_modules/

@@ -1,8 +1,16 @@
 {
   "name": "dsh-voice-bridge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "贾维斯式语音助手 for DSH：本地唤醒词「贾维斯」+ 中文识别自动填入并发送 + 语音朗读回答，Windows 专用。",
-  "keywords": ["dsh-plugin", "dsh", "voice", "wake-word", "speech-to-text", "tts", "jarvis"],
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "voice",
+    "wake-word",
+    "speech-to-text",
+    "tts",
+    "jarvis"
+  ],
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -29,7 +37,9 @@
   "bugs": {
     "url": "https://github.com/kinglhy2006/dsh-voice-bridge/issues"
   },
-  "os": ["win32"],
+  "os": [
+    "win32"
+  ],
   "dsh": {
     "manifestVersion": 1,
     "bundle": {
@@ -44,6 +54,8 @@
     "@deepseek-ai/cordis": "*"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": { "optional": true }
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
   }
 }

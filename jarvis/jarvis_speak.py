@@ -41,6 +41,7 @@ VOICE_TURN = os.path.join(HERE, "voice_turn.json")
 
 VOICE = "zh-CN-XiaoxiaoNeural"   # 晓晓；换男声可用 zh-CN-YunxiNeural
 RATE = "+10%"
+LOG_MAX_BYTES = 5 * 1024 * 1024
 
 QUEUE = []
 LOCK = threading.Lock()
@@ -51,10 +52,26 @@ def log(msg):
     line = "%s %s" % (time.strftime("%H:%M:%S"), msg)
     print(line, flush=True)
     try:
+        # 超过 5MB 转一次，长期开着不会把日志写成几个 G
+        if os.path.getsize(LOG) > LOG_MAX_BYTES:
+            os.replace(LOG, LOG + ".1")
+    except Exception:
+        pass
+    try:
         with io.open(LOG, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
         pass
+
+
+def cleanup_temp():
+    """上一次被强杀可能留下没删的临时音频。"""
+    for pattern in ("_speak_*.mp3", "_speak_*.wav"):
+        for path in glob.glob(os.path.join(HERE, pattern)):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------- 播放 / 合成
@@ -378,6 +395,15 @@ def newest_session_file():
     return max(files, key=os.path.getmtime)
 
 
+def stat_sig(path):
+    """(大小, 修改时间)：没变就不用把整个会话重新解压一遍。"""
+    try:
+        st = os.stat(path)
+        return (st.st_size, st.st_mtime_ns)
+    except Exception:
+        return None
+
+
 def read_records(path):
     out = []
     try:
@@ -557,10 +583,12 @@ def main():
             print(items[-1][1][:800])
         return 0
 
+    cleanup_temp()
     log("盯住会话文件: %s（只念这之后的新回答）" % os.path.basename(os.path.dirname(path)))
     threading.Thread(target=worker, daemon=True).start()
 
     tracked = path
+    seen = stat_sig(tracked)
     while True:
         time.sleep(args.interval)
         newest = newest_session_file()
@@ -568,17 +596,22 @@ def main():
             tracked = newest
             items = assistant_texts(read_records(tracked))
             last_seq = max([s for s, _ in items], default=0)
+            seen = stat_sig(tracked)
             log("切换会话: %s" % os.path.basename(os.path.dirname(tracked)))
             continue
-        for seq, text in assistant_texts(read_records(tracked)):
-            if seq is None or seq <= last_seq:
-                continue
-            last_seq = seq
-            if not take_voice_turn():
-                log("这条是你打字问的，不念：%s" % text[:30])
-                continue
-            with LOCK:
-                QUEUE.append(text)
+        sig = stat_sig(tracked)
+        # 文件没变就跳过：以前每 1.5 秒把整个会话重解压一遍，会话长了纯属空转
+        if sig is not None and sig != seen:
+            seen = sig
+            for seq, text in assistant_texts(read_records(tracked)):
+                if seq is None or seq <= last_seq:
+                    continue
+                last_seq = seq
+                if not take_voice_turn():
+                    log("这条是你打字问的，不念：%s" % text[:30])
+                    continue
+                with LOCK:
+                    QUEUE.append(text)
 
         # 看门狗：有活要干、但朗读线程 30 秒没动静，说明它卡死了，重启一个
         with LOCK:

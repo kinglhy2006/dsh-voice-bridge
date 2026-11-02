@@ -1,4 +1,4 @@
-﻿# 贾维斯语音助手 · 依赖安装（Windows / PowerShell）
+# 贾维斯语音助手 · 依赖安装（Windows / PowerShell）
 # 用法：右键“使用 PowerShell 运行”，或：
 #   powershell -ExecutionPolicy Bypass -File install.ps1
 
@@ -23,7 +23,7 @@ $env:HTTP_PROXY = ''
 $env:HTTPS_PROXY = ''
 & $python -m pip install --quiet --disable-pip-version-check `
   -i https://mirrors.aliyun.com/pypi/simple/ `
-  sherpa-onnx sounddevice numpy pyttsx3 edge-tts zstandard
+  sherpa-onnx sounddevice numpy pyttsx3 edge-tts zstandard pypinyin
 & $python -c "import sherpa_onnx, sounddevice, pyttsx3, edge_tts, zstandard; print('    依赖 OK')"
 
 Write-Host '[3/3] 挑麦克风（请现在对着电脑说话 6 秒）...' -ForegroundColor Cyan
@@ -42,7 +42,7 @@ Write-Host ''
 Write-Host '=== 还差两步 ===' -ForegroundColor Green
 Write-Host '1) DSH → 插件面板 → 添加本地目录，填：'
 Write-Host "   $here" -ForegroundColor Yellow
-Write-Host '2) 重启 DSH，然后喊「贾维斯」试试。'
+Write-Host '2) 重启 DSH，然后喊「你好贾维斯」试试。'
 Write-Host ''
 Write-Host '识别模型（228MB）由 DSH 自带语音输入下载：在 DSH 里点一次麦克风按钮让它准备一次即可。'
 Write-Host '换声音：改 jarvis\voice.json 里的 voice 字段，重启 DSH。'

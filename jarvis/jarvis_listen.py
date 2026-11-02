@@ -19,8 +19,24 @@ import re
 import sys
 import time
 
-import numpy as np
-import sherpa_onnx
+try:
+    import numpy as np
+except ImportError:  # 只有真处理音频时才必需；缺了给明确提示，别直接炸在 import 行
+    np = None
+
+
+def _sherpa():
+    try:
+        import sherpa_onnx
+    except ImportError:
+        raise SystemExit("缺 sherpa-onnx，先跑一次 install.ps1")
+    return sherpa_onnx
+
+
+def _require_numpy():
+    if np is None:
+        raise SystemExit("缺 numpy，先跑一次 install.ps1")
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -50,10 +66,13 @@ SENSE_DIR = _find_dir(
 )
 SAMPLE_RATE = 16000
 BLOCK = 1600  # 0.1 秒
+# ponytail: 固定 3 倍增益，麦克风离得远/音量小也能听清；换设备或觉得太灵敏就调这里
+GAIN = 3.0
 
 
 
 def build_kws(keywords_file):
+    sherpa_onnx = _sherpa()
     return sherpa_onnx.KeywordSpotter(
         tokens=os.path.join(MODEL_DIR, "tokens.txt"),
         encoder=os.path.join(MODEL_DIR, "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx"),
@@ -75,6 +94,7 @@ def build_asr(num_threads=4):
             "找不到 SenseVoice 识别模型。请先跑一次 DSH 的语音输入（它会自动下载），"
             "或者把模型放到 jarvis\\..\\models\\sensevoice-onnx 目录下。"
         )
+    sherpa_onnx = _sherpa()
     return sherpa_onnx.OfflineRecognizer.from_sense_voice(
         model=os.path.join(SENSE_DIR, "model.int8.onnx"),
         tokens=os.path.join(SENSE_DIR, "tokens.txt"),
@@ -109,7 +129,33 @@ VOICE_TURN = os.path.join(HERE, "voice_turn.json")
 RESUME_WORDS = {"续", "继续", "继续吧", "继续啊", "接着", "接着吧", "接着说", "继续讲", "继续刚才的", "往下说", "讲下去", "再继续", "接着说下去"}
 
 
-WAKE_PREFIXES = ("贾维斯", "贾维", "小贾")
+WAKE_PREFIXES = ("你好贾维斯", "你好贾维", "贾维斯", "贾维", "小贾")
+
+# 「停」类指令：只用来打断朗读，绝不发给模型
+STOP_WORDS = {
+    "停", "停停", "停下", "停一下", "暂停", "打住", "别念", "别念了", "不要念", "不要念了",
+    "不用念", "不用念了", "别说了", "闭嘴", "安静", "住口", "消停",
+}
+STOP_HINTS = ("别念", "不要念", "不用念", "闭嘴", "安静", "住口", "停")
+
+
+def _strip_wake(text):
+    """去掉开头的称呼，「贾维斯，继续」和「继续」要能分到一起。"""
+    cleaned = re.sub(r"[\s。，、！？!?.,]", "", text or "")
+    for prefix in WAKE_PREFIXES:
+        if cleaned.startswith(prefix):
+            return cleaned[len(prefix):]
+    return cleaned
+
+
+def is_stop_command(text):
+    """「停 / 别念了 / 闭嘴」这类话是打断指令，不能当成问题发给模型。"""
+    cleaned = _strip_wake(text)
+    if not cleaned:
+        return False
+    if cleaned in STOP_WORDS:
+        return True
+    return len(cleaned) <= 6 and any(hint in cleaned for hint in STOP_HINTS)
 
 
 def is_resume_command(text):
@@ -117,11 +163,7 @@ def is_resume_command(text):
 
     口头上常常连着说"贾维斯，继续"，所以先去掉开头的称呼再判断。
     """
-    cleaned = re.sub(r"[\s。，、！？!?.,]", "", text or "")
-    for prefix in WAKE_PREFIXES:
-        if cleaned.startswith(prefix):
-            cleaned = cleaned[len(prefix):]
-            break
+    cleaned = _strip_wake(text)
     if cleaned in RESUME_WORDS:
         return True
     return len(cleaned) <= 4 and ("继续" in cleaned or cleaned.endswith("续"))
@@ -149,6 +191,7 @@ def publish(text):
 
 def read_wav(path):
     import wave
+    _require_numpy()
     with wave.open(path, "rb") as w:
         if w.getnchannels() != 1 or w.getsampwidth() != 2:
             raise SystemExit("只支持 16bit 单声道 wav: " + path)
@@ -168,13 +211,25 @@ def run_wav(args):
     return 0
 
 
+def rotate_log(path, limit=5 * 1024 * 1024):
+    """日志超过 5MB 就改名一次，长期开着别把盘塞满。"""
+    try:
+        if os.path.getsize(path) > limit:
+            os.replace(path, path + ".1")
+    except Exception:
+        pass
+
+
 def run_live(args):
     import sounddevice as sd
 
+    _require_numpy()
     kws = build_kws(args.keywords)
     asr = build_asr()
-    log = io.open(os.path.join(HERE, "transcript.log"), "a", encoding="utf-8", newline="\n")
-    print("已就绪：先说「贾维斯」，听到叮声后说你要说的话。", flush=True)
+    transcript = os.path.join(HERE, "transcript.log")
+    rotate_log(transcript)
+    log = io.open(transcript, "a", encoding="utf-8", newline="\n")
+    print("已就绪：先说「你好贾维斯」，听到叮声后说你要说的话。", flush=True)
 
     stream = kws.create_stream()
     listening = False
@@ -183,6 +238,8 @@ def run_live(args):
     silence = 0.0
     started = 0.0
     loud = 0.0
+    wake_at = 0.0
+    peak_seen = 0.0
 
     def i_am_speaking():
         """朗读程序正在放音时，麦克风会听到自己的声音——这段时间不做唤醒判断。"""
@@ -205,12 +262,22 @@ def run_live(args):
                 print("你：" + (text or "（空）"), flush=True)
                 log.write(line + "\n")
                 log.flush()
+                if text:
+                    beep(523, 80)  # 「咚」：这段说完了，开始识别/发送
                 if text and not args.no_publish:
                     if not re.sub(r"[^\w\u4e00-\u9fff]", "", text):
                         print("· 只识别到标点，忽略这次", flush=True)
                         text = ""
                 if text and not args.no_publish:
-                    if is_resume_command(text):
+                    if is_stop_command(text):
+                        # 「停 / 别念了」是打断指令，只让朗读闭嘴，不进对话
+                        try:
+                            with io.open(STOP_FLAG, "w", encoding="utf-8") as f:
+                                f.write(str(time.time()))
+                            print("· 收到「停」，不念了（没发给模型）", flush=True)
+                        except Exception:
+                            pass
+                    elif is_resume_command(text):
                         # 「继续」是给朗读程序用的，不进对话、不麻烦模型
                         try:
                             now_ts = time.time()
@@ -265,32 +332,32 @@ def run_live(args):
                             print("· 我在听…", flush=True)
                             listening = True
                             started = time.time()
-                            buf, silence = [], 0.0
+                            buf, silence, peak_seen = [], 0.0, 0.0
                             break
                 else:
+                    # 录音阶段放大再判断/识别：说话轻的时候静音检测才不会误判成「说完了」
+                    frame = np.ascontiguousarray(frame * GAIN, dtype=np.float32)
                     buf.append(frame)
                     rms = float(np.sqrt(np.mean(frame ** 2)))
+                    if rms > peak_seen:
+                        peak_seen = rms
                     now = time.time()
                     if rms >= args.silence_rms:
                         # 有声音：标记「已经开始说话」，并重置静音计时
                         if not speech_started:
                             speech_started = True
-                            speech_at = now
                         silence = 0.0
                     elif speech_started:
                         silence += BLOCK / SAMPLE_RATE
-                    # 还没开口：只等 grace 秒，超时就放弃这次唤醒
+                    # 还没开口：等 grace 秒，超时就放弃这次唤醒
                     if not speech_started and (now - started) > args.grace_seconds:
-                        print("· 没听到说话，退回去等唤醒。", flush=True)
+                        print("· 没听到说话（最大音量 %.3f，门槛 %.3f），退回去等唤醒。" % (
+                            peak_seen, args.silence_rms), flush=True)
                         buf, listening, silence, speech_started = [], False, 0.0, False
                         stream = kws.create_stream()
                         continue
                     done = (speech_started and silence >= args.silence_time) or \
                            (now - started) > args.max_seconds
-                    # 短指令（说得很短）快速收尾：不让「续」「停」这类命令等满 2 秒
-                    if (speech_started and not done and silence >= args.short_silence_time
-                            and (now - speech_at) <= args.short_speech_seconds):
-                        done = True
                     if done:
                         finish()
                         speech_started = False
@@ -302,20 +369,44 @@ def run_live(args):
     return 0
 
 
+def run_selftest():
+    """自检：不碰麦克风、不装依赖也能跑，确认「停 / 继续」这类话分得对。"""
+    should_stop = ["停", "贾维斯，停一下", "别念了。", "闭嘴", "贾维斯，安静", "不用念了"]
+    should_not_stop = [
+        "继续", "贾维斯", "今天天气怎么样", "停下来讲个笑话", "帮我停一下那个服务", "停战协议是什么",
+    ]
+    should_resume = ["继续", "贾维斯，继续", "接着说", "续"]
+    should_not_resume = ["继续这个话题的深入分析", "贾维斯，帮我查一下续费日期"]
+
+    for t in should_stop:
+        assert is_stop_command(t), "该判成停：%s" % t
+    for t in should_not_stop:
+        assert not is_stop_command(t), "不该判成停：%s" % t
+    for t in should_resume:
+        assert is_resume_command(t), "该判成继续：%s" % t
+    for t in should_not_resume:
+        assert not is_resume_command(t), "不该判成继续：%s" % t
+
+    print("selftest ok: 停 %d 例 / 非停 %d 例 / 继续 %d 例 / 非继续 %d 例" % (
+        len(should_stop), len(should_not_stop), len(should_resume), len(should_not_resume)))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--wav")
+    ap.add_argument("--selftest", action="store_true", help="只自检文本分类逻辑，不碰麦克风")
     ap.add_argument("--device", type=int, default=None)
     ap.add_argument("--keywords", default=os.path.join(HERE, "keywords.txt"))
-    ap.add_argument("--silence-rms", type=float, default=0.012)
-    ap.add_argument("--silence-time", type=float, default=2.0)
+    ap.add_argument("--silence-rms", type=float, default=0.006)
+    ap.add_argument("--silence-time", type=float, default=2.5)
     ap.add_argument("--max-seconds", type=float, default=45.0)
-    ap.add_argument("--grace-seconds", type=float, default=3.0)
-    ap.add_argument("--short-silence-time", type=float, default=0.7)
-    ap.add_argument("--short-speech-seconds", type=float, default=1.4)
+    ap.add_argument("--grace-seconds", type=float, default=8.0)
     ap.add_argument("--no-publish", action="store_true")
     args = ap.parse_args()
+    if args.selftest:
+        return run_selftest()
     if args.wav:
         return run_wav(args)
     if args.live:

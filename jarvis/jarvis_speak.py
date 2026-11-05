@@ -43,6 +43,11 @@ VOICE = "zh-CN-XiaoxiaoNeural"   # 晓晓；换男声可用 zh-CN-YunxiNeural
 RATE = "+10%"
 LOG_MAX_BYTES = 5 * 1024 * 1024
 
+# 念之前要改掉的名字：自己念出「贾维斯」，监听会当成你喊它，念到一半自己打断自己
+WAKE_NAMES = ("你好贾维斯", "贾维斯", "贾维", "小贾")
+SPEECH_MAX = 200          # 一次最多念多少字，超了只念开头（voice.json 里 max_chars 可改）
+SPEECH_TAIL = "……后面还有，看屏幕吧。"
+
 QUEUE = []
 LOCK = threading.Lock()
 STOP = threading.Event()
@@ -181,6 +186,35 @@ def current_voice():
     return voice, rate
 
 
+def speech_limit():
+    """voice.json 里的 max_chars 优先，没写就用 SPEECH_MAX。"""
+    try:
+        with io.open(VOICE_CFG, "r", encoding="utf-8") as f:
+            value = int(json.load(f).get("max_chars") or 0)
+        return value if value > 40 else SPEECH_MAX
+    except Exception:
+        return SPEECH_MAX
+
+
+def for_speech(text):
+    """念之前收拾文本：
+
+    - 自己的名字一律不念（换成「语音助手」），免得被自己的回声唤醒；
+    - 太长的回答只念开头，剩下的让人看屏幕。
+    """
+    s = str(text)
+    for name in WAKE_NAMES:
+        s = s.replace(name, "语音助手")
+    limit = speech_limit()
+    if len(s) <= limit:
+        return s
+    cut = s[:limit]
+    stop = max(cut.rfind("。"), cut.rfind("！"), cut.rfind("？"))
+    if stop >= limit * 0.5:
+        cut = cut[:stop + 1]
+    return cut + SPEECH_TAIL
+
+
 PROXY_KEYS = (
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
     "http_proxy", "https_proxy", "all_proxy",
@@ -309,7 +343,7 @@ def speak(text):
         pass
 
     sentences = [
-        s for s in split_sentences(text) if re.sub(r"[^\w\u4e00-\u9fff]", "", s)
+        s for s in split_sentences(for_speech(text)) if re.sub(r"[^\w\u4e00-\u9fff]", "", s)
     ]
     if not sentences:
         return
@@ -554,13 +588,31 @@ def worker():
         speak(job)
 
 
+def run_selftest():
+    """不联网、不出声，只检查念之前的文本处理对不对。"""
+    short = "明天成都 13 到 19 度，阴。"
+    assert for_speech(short) == short, "短句不该被改"
+    spoken = for_speech("想唤醒我，说「你好贾维斯」或者「贾维斯」都行。")
+    assert "贾维斯" not in spoken and "贾维" not in spoken, "自己的名字不能念：" + spoken
+    long_text = "这是第一句。" * 60
+    cut = for_speech(long_text)
+    assert cut.endswith(SPEECH_TAIL), "长回答要提示看屏幕"
+    assert len(cut) <= speech_limit() + len(SPEECH_TAIL), "长回答要截短"
+    print("selftest ok: 短句原样 / 名字已换 / 长句 %d→%d 字" % (len(long_text), len(cut)))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true", help="只打印最新一条回答，不出声")
     ap.add_argument("--say", help="直接念一句话")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--selftest", action="store_true", help="只自检文本处理，不出声")
     ap.add_argument("--interval", type=float, default=1.5)
     args = ap.parse_args()
+
+    if args.selftest:
+        return run_selftest()
 
     if args.say:
         speak(args.say)

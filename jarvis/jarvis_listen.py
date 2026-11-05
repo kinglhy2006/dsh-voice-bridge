@@ -12,6 +12,7 @@
   python jarvis_listen.py --wav 某段话.wav          # 只测识别
 """
 import argparse
+import collections
 import io
 import json
 import os
@@ -125,6 +126,48 @@ SPEAK_FLAG = os.path.join(HERE, "speaking.flag")
 STOP_FLAG = os.path.join(HERE, "stop_speaking.flag")
 RESUME_FLAG = os.path.join(HERE, "resume.flag")
 VOICE_TURN = os.path.join(HERE, "voice_turn.json")
+RECORD_FLAG = os.path.join(HERE, "recording.flag")
+FOLLOWUP_FLAG = os.path.join(HERE, "followup.flag")
+VOICE_CFG = os.path.join(HERE, "voice.json")
+FOLLOWUP_DEFAULT = 25.0
+
+
+def followup_seconds():
+    """一句回答念完之后，再免唤醒听多少秒（0 = 关掉，每次都要喊名字）。
+
+    谷歌「继续对话」、亚马逊 Follow-up 都是这个思路：趁你还没走开，
+    留一小段时间不用喊唤醒词。voice.json 里写 followup_seconds 可改。
+    """
+    try:
+        with io.open(VOICE_CFG, "r", encoding="utf-8") as f:
+            value = float(json.load(f).get("followup_seconds", FOLLOWUP_DEFAULT))
+    except Exception:
+        return FOLLOWUP_DEFAULT
+    return max(0.0, min(value, 120.0))
+
+
+def set_recording(on):
+    """录音时写个标记，界面靠它显示「录音中」。录完立刻删，界面才知道该切走了。"""
+    try:
+        if on:
+            with io.open(RECORD_FLAG, "w", encoding="utf-8") as f:
+                f.write(str(time.time()))
+        elif os.path.exists(RECORD_FLAG):
+            os.remove(RECORD_FLAG)
+    except Exception:
+        pass
+
+
+def set_followup(on):
+    """免唤醒窗口开着时留个标记，界面显示「直接说」。"""
+    try:
+        if on:
+            with io.open(FOLLOWUP_FLAG, "w", encoding="utf-8") as f:
+                f.write(str(time.time()))
+        elif os.path.exists(FOLLOWUP_FLAG):
+            os.remove(FOLLOWUP_FLAG)
+    except Exception:
+        pass
 
 RESUME_WORDS = {"续", "继续", "继续吧", "继续啊", "接着", "接着吧", "接着说", "继续讲", "继续刚才的", "往下说", "讲下去", "再继续", "接着说下去"}
 
@@ -230,6 +273,8 @@ def run_live(args):
     rotate_log(transcript)
     log = io.open(transcript, "a", encoding="utf-8", newline="\n")
     print("已就绪：先说「你好贾维斯」，听到叮声后说你要说的话。", flush=True)
+    set_recording(False)  # 上次要是崩在录音中途，会留下一个过期的标记
+    set_followup(False)
 
     stream = kws.create_stream()
     listening = False
@@ -240,6 +285,11 @@ def run_live(args):
     loud = 0.0
     wake_at = 0.0
     peak_seen = 0.0
+    was_speaking = False
+    follow_until = 0.0
+    onset = 0.0
+    onset_rms = max(args.silence_rms * 1.5, 0.008)  # 比判定「说完」的门槛高一点，免得风扇声误触发
+    recent = collections.deque(maxlen=6)  # 最近 0.6 秒，免唤醒起头时补回去
 
     def i_am_speaking():
         """朗读程序正在放音时，麦克风会听到自己的声音——这段时间不做唤醒判断。"""
@@ -250,6 +300,7 @@ def run_live(args):
 
     def finish():
         nonlocal buf, listening, silence, started, speech_started
+        set_recording(False)  # 收音一停，界面上就该从「录音中」切成「思考中」
         if buf:
             audio = np.concatenate(buf)
             dur = len(audio) / float(SAMPLE_RATE)
@@ -307,6 +358,27 @@ def run_live(args):
                 if not listening:
                     # 放音期间也照常做唤醒检测——这样你可以在我说到一半时打断我
                     speaking_now = i_am_speaking()
+                    now = time.time()
+                    if speaking_now:
+                        # 正在念：免唤醒窗口先收起，这会儿只认「你好贾维斯」来打断
+                        was_speaking = True
+                        if follow_until:
+                            follow_until = 0.0
+                            set_followup(False)
+                    elif was_speaking:
+                        # 刚念完：开一个免唤醒窗口，这段里直接开口问，不用喊名字
+                        was_speaking = False
+                        window = followup_seconds()
+                        if window > 0:
+                            follow_until = now + window
+                            onset = 0.0
+                            set_followup(True)
+                            print("· 免唤醒窗口 %.0f 秒：直接说话就行" % window, flush=True)
+                    if follow_until and (now > follow_until or not os.path.exists(FOLLOWUP_FLAG)):
+                        # 到点了，或者界面那边发现你在打字、把标记删了 —— 都退出免唤醒
+                        follow_until = 0.0
+                        set_followup(False)
+                    recent.append(frame)
                     stream.accept_waveform(SAMPLE_RATE, frame)
                     peak = float(np.abs(frame).max())
                     if peak > 0.05:
@@ -331,9 +403,31 @@ def run_live(args):
                             wake_at = time.time()
                             print("· 我在听…", flush=True)
                             listening = True
+                            set_recording(True)
                             started = time.time()
                             buf, silence, peak_seen = [], 0.0, 0.0
+                            follow_until, onset = 0.0, 0.0
+                            set_followup(False)
+                            recent.clear()
                             break
+                    # 免唤醒：窗口内连着听到 0.4 秒人声就直接开始录，不用再喊名字
+                    if not listening and not speaking_now and follow_until > now:
+                        rms_now = float(np.sqrt(np.mean((frame * GAIN) ** 2)))
+                        onset = onset + BLOCK / SAMPLE_RATE if rms_now >= onset_rms else 0.0
+                        if onset >= 0.4:
+                            beep()
+                            wake_at = time.time()
+                            print("· 免唤醒：听到你开口了", flush=True)
+                            listening = True
+                            set_recording(True)
+                            started = time.time()
+                            # 把刚才缓存的 0.6 秒补回去，起头的字不会被吃掉
+                            buf = [np.ascontiguousarray(f * GAIN, dtype=np.float32) for f in recent]
+                            silence, peak_seen, speech_started = 0.0, 0.0, True
+                            follow_until, onset = 0.0, 0.0
+                            set_followup(False)
+                            recent.clear()
+                            continue
                 else:
                     # 录音阶段放大再判断/识别：说话轻的时候静音检测才不会误判成「说完了」
                     frame = np.ascontiguousarray(frame * GAIN, dtype=np.float32)
@@ -353,6 +447,7 @@ def run_live(args):
                     if not speech_started and (now - started) > args.grace_seconds:
                         print("· 没听到说话（最大音量 %.3f，门槛 %.3f），退回去等唤醒。" % (
                             peak_seen, args.silence_rms), flush=True)
+                        set_recording(False)
                         buf, listening, silence, speech_started = [], False, 0.0, False
                         stream = kws.create_stream()
                         continue

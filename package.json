@@ -1,6 +1,6 @@
 {
   "name": "dsh-voice-bridge",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "贾维斯式语音助手 for DSH：本地唤醒词「贾维斯」+ 中文识别自动填入并发送 + 语音朗读回答，Windows 专用。",
   "keywords": [
     "dsh-plugin",
